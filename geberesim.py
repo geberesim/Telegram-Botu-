@@ -1,6 +1,7 @@
 import random
 import string
 import requests
+import re
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
@@ -31,10 +32,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🛠️ Kullanılabilir komutlar:\n"
         "/start - Botu başlat\n"
         "/help - Yardım komutları\n"
-        "/kelimeoyunu - 5 rastgele harf verir ve bu harflerle en az 3 kelimelik bir kelime oyunu başlatır\n"
+        "/kelimeoyunu - 5 rastgele harf verir ve kelime oyunu başlatır\n"
         "/tahmin <kelime> - Tahminde bulun\n"
-        "/cevap - Mevcut oyundaki geçerli kelimeleri listeler\n\n"
-        "Ayrıca: 'bugün hava nasıl [şehir]' yazarsan hava durumu verir."
+        "/cevap - Geçerli kelimeleri listeler\n\n"
+        "Hava durumu için şu şekilde yaz:\n"
+        "- bugün hava nasıl ankara\n"
+        "- bugün hava nasıl izmir 3 günlük"
     )
 
 # /kelimeoyunu
@@ -56,7 +59,7 @@ async def kelime_oyunu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
     await update.message.reply_text("⚠️ Uygun harf bulunamadı. Tekrar deneyin.")
 
-# /tahmin <kelime>
+# /tahmin
 async def tahmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not active_letters:
         await update.message.reply_text("Önce /kelimeoyunu başlatmalısın.")
@@ -76,47 +79,76 @@ async def cevap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not valid_words:
         await update.message.reply_text("Kelime oyunu başlatılmadı.")
     else:
-        await update.message.reply_text("📜 Uygun kelimeler:\n" + ", ".join(valid_words))
+        await update.message.reply_text("📜 Geçerli kelimeler:\n" + ", ".join(valid_words))
 
-# Hava durumu metni algıla
+# Hava durumu ve tahmin
 async def handle_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.lower()
 
-    if "bugün hava nasıl" in text:
-        parts = text.split("bugün hava nasıl")
-        city = parts[1].strip() if len(parts) > 1 else ""
+    if "hava" in text:
+        match = re.search(r"bugün hava nasıl\s*(.*?)\s*(\d+)?\s*günlük?", text)
+        city = match.group(1).strip() if match else ""
+        days = int(match.group(2)) if match and match.group(2) else 1
 
         if not city:
             await update.message.reply_text("Lütfen şehir adını da yaz: 'bugün hava nasıl İzmir'")
             return
+        if days > 7:
+            await update.message.reply_text("Maksimum 7 günlük tahmin alınabilir.")
+            return
 
-        url = "http://api.weatherapi.com/v1/current.json"
-        params = {
-            "key": WEATHER_API_KEY,
-            "q": city,
-            "lang": "tr"
-        }
+        base_url = "http://api.weatherapi.com/v1/"
         try:
-            r = requests.get(url, params=params)
-            data = r.json()
+            if days == 1:
+                url = base_url + "current.json"
+                params = {"key": WEATHER_API_KEY, "q": city, "lang": "tr"}
+                r = requests.get(url, params=params)
+                data = r.json()
 
-            if "error" in data:
-                await update.message.reply_text(f"Şehir bulunamadı: {city}")
-                return
+                if "error" in data:
+                    await update.message.reply_text(f"Şehir bulunamadı: {city}")
+                    return
 
-            loc = data["location"]
-            current = data["current"]
-            await update.message.reply_text(
-                f"📍 {loc['name']}, {loc['region']}, {loc['country']}\n"
-                f"🌡️ {current['temp_c']}°C, {current['condition']['text']}\n"
-                f"💨 Rüzgar: {current['wind_kph']} km/s"
-            )
-        except Exception:
+                loc = data["location"]
+                current = data["current"]
+                await update.message.reply_text(
+                    f"📍 {loc['name']}, {loc['region']}, {loc['country']}\n"
+                    f"🌡️ Sıcaklık: {current['temp_c']}°C\n"
+                    f"🤒 Hissedilen: {current['feelslike_c']}°C\n"
+                    f"🌤️ Hava: {current['condition']['text']}\n"
+                    f"💧 Nem: %{current['humidity']}\n"
+                    f"💨 Rüzgar: {current['wind_kph']} km/s\n"
+                    f"☁️ Bulut: %{current['cloud']}\n"
+                    f"🔭 Görüş: {current['vis_km']} km\n"
+                    f"🌞 UV: {current['uv']}"
+                )
+            else:
+                url = base_url + "forecast.json"
+                params = {"key": WEATHER_API_KEY, "q": city, "days": days, "lang": "tr"}
+                r = requests.get(url, params=params)
+                data = r.json()
+
+                if "error" in data:
+                    await update.message.reply_text(f"Şehir bulunamadı: {city}")
+                    return
+
+                forecast_text = f"📍 {data['location']['name']}, {data['location']['region']}, {data['location']['country']}\n\n"
+                for day in data['forecast']['forecastday']:
+                    forecast_text += (
+                        f"📅 {day['date']}\n"
+                        f"🌡️ Max: {day['day']['maxtemp_c']}°C / Min: {day['day']['mintemp_c']}°C\n"
+                        f"🌤️ {day['day']['condition']['text']}\n"
+                        f"💧 Nem: %{day['day']['avghumidity']}\n"
+                        f"☀️ UV: {day['day']['uv']}\n\n"
+                    )
+                await update.message.reply_text(forecast_text.strip())
+        except Exception as e:
+            print("Hata:", e)
             await update.message.reply_text("🌐 Hava durumu alınamadı.")
     else:
         await update.message.reply_text("Komutu anlayamadım. Yardım için /help yazabilirsin.")
 
-# Geçersiz komutları yakala
+# Geçersiz komutlar
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Komutu anlayamadım. Yardım için /help yazabilirsin.")
 
